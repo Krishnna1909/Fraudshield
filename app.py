@@ -8,6 +8,7 @@ from utils.model import load_model, predict_transaction
 from utils.claude_integration import generate_fraud_report
 import warnings
 warnings.filterwarnings('ignore')
+api_key=st.secrets["ANTHROIPC_API_KEY"]
 
 # ─── Page Config ───────────────────────────────────────────────────────────────
 st.set_page_config(

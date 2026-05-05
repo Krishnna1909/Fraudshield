@@ -3,7 +3,7 @@ import os
 from typing import Dict
 
 # Your API key is used automatically — recruiters don't need to enter anything
-_CLIENT = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", "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"))
+_CLIENT = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", "YOUR_API_KEY_HERE"))
 
 
 def generate_fraud_report(

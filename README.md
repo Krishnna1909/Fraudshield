@@ -93,15 +93,19 @@ FraudShield/
 
 ## 📊 Model Performance
 
-| Metric | Score |
-|---|---|
-| ROC-AUC | 0.974 |
-| Precision | 0.891 |
-| Recall | 0.823 |
-| F1-Score | 0.856 |
-| Accuracy | 99.94% |
+The model is trained on **interpretable business features** (amount, hour, transaction velocity, foreign-transaction flag, card type, merchant category, etc.) rather than the dataset's raw anonymized `V1-V28` PCA columns — those can't be entered through a real UI and have no clear business meaning. Since the Kaggle dataset has no card/user ID, per-card history fields (avg 7-day spend, days since last transaction, etc.) are engineered from calibrated, class-conditioned distributions rather than pulled from real per-user records — see the comments at the top of `train.py` for the exact rationale and design choice. Metrics below are the real, live output of that model, computed on an untouched, real-world-imbalanced test split:
 
-Trained on the [Kaggle Credit Card Fraud Detection dataset](https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud) — 284,807 transactions, 0.17% fraud rate. SMOTE applied to handle class imbalance.
+| Metric | Score (@ 0.5 threshold) |
+|---|---|
+| ROC-AUC | ~0.97 |
+| Precision | ~0.14 |
+| Recall | ~0.52 |
+| F1-Score | ~0.22 |
+| Accuracy | ~99.4% |
+
+Because true fraud is roughly 1-in-580 transactions in the test set, precision at the default 0.5 threshold is naturally low — this is a real, expected property of extreme class imbalance, not a bug. `train.py` also computes an F1-optimal decision threshold (typically ~0.75-0.8) and reports precision/recall at that operating point; the Streamlit sidebar threshold slider lets you explore this trade-off directly. All numbers on the "Model Insights" tab (confusion matrix, ROC curve, metrics table) are pulled live from the saved model artifact — nothing on that tab is hardcoded.
+
+Trained on the [Kaggle Credit Card Fraud Detection dataset](https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud) — 284,807 transactions, 0.17% fraud rate. SMOTE applied to the training split only (never the test split) to handle class imbalance.
 
 ---
 

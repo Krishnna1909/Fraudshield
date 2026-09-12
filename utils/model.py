@@ -1,14 +1,16 @@
 """
 FraudShield — utils/model.py
-Loads the trained XGBoost model and exposes the exact API that app.py expects:
-    load_model()          → dict of artefacts
-    predict_transaction() → prediction result dict
+Loads the trained XGBoost model and exposes the API app.py expects:
+    load_model()          -> dict of artefacts
+    predict_transaction()  -> single-transaction prediction result dict
+    predict_batch()         -> vectorized predictions for a DataFrame of transactions
+    get_model_metrics()      -> real evaluation metrics computed at training time
+    get_confusion_matrix()    -> real confusion matrix (for Tab 2)
+    get_roc_curve()            -> real ROC curve points (for Tab 2)
 """
 
 from __future__ import annotations
 
-import os
-import joblib
 import warnings
 from functools import lru_cache
 from pathlib import Path
@@ -16,22 +18,26 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import joblib
 
 # ── Numpy 2.0 / SHAP compatibility patch ─────────────────────────────────────
 # Mirrors the same patch in train.py — must run before any shap import.
-for _alias, _target in [
-    ("bool",    bool),
-    ("int",     int),
-    ("float",   float),
-    ("complex", complex),
-    ("object",  object),
-    ("str",     str),
-]:
-    if not hasattr(np, _alias):
-        setattr(np, _alias, _target)
+# (object/str are checked with warnings suppressed: on some numpy versions
+# `hasattr(np, "object")` itself emits a harmless FutureWarning.)
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore", FutureWarning)
+    for _alias, _target in [
+        ("bool",    bool),
+        ("int",     int),
+        ("float",   float),
+        ("complex", complex),
+        ("object",  object),
+        ("str",     str),
+    ]:
+        if not hasattr(np, _alias):
+            setattr(np, _alias, _target)
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Path to the pkl saved by train.py
 MODEL_PATH = Path(__file__).parent.parent / "models" / "xgboost_fraud.pkl"
 
 
@@ -45,76 +51,75 @@ def load_model() -> dict[str, Any]:
     """
     Load artefacts from models/xgboost_fraud.pkl.
     Cached with lru_cache — disk is only read once per process.
-
-    Returns dict with keys:
-        model, scaler, explainer, feature_names,
-        shap_values, X_sample, metrics
     """
     if not MODEL_PATH.exists():
         raise ModelNotTrainedError(
             f"Model file not found at '{MODEL_PATH}'.\n"
             "Run `python train.py` first (needs data/creditcard.csv)."
         )
-    artifacts = joblib.load(MODEL_PATH)
-    return artifacts
+    return joblib.load(MODEL_PATH)
 
 
 def is_model_loaded() -> bool:
-    """Return True if the model pkl exists on disk."""
     return MODEL_PATH.exists()
 
 
-def predict_transaction(transaction: dict[str, float | int]) -> dict[str, Any]:
-    """
-    Score a single transaction dict.
+def _prepare_row(transaction: dict[str, Any], arts: dict[str, Any]) -> pd.DataFrame:
+    """Build a single-row, model-ready (encoded + scaled) DataFrame from a raw feature dict."""
+    feat_names = arts["feature_names"]
+    numeric_cols = arts["numeric_cols"]
+    categorical_cols = arts["categorical_cols"]
+    encoders = arts["encoders"]
 
-    Parameters
-    ----------
-    transaction : dict
-        Keys must include all feature names used during training
-        (V1–V28, Amount, Time — same columns as creditcard.csv minus 'Class').
+    row = {}
+    for col in feat_names:
+        if col in categorical_cols:
+            raw_val = transaction.get(col, encoders[col].classes_[0])
+            # Unseen category -> fall back to the first known class rather than crashing
+            if raw_val not in set(encoders[col].classes_):
+                raw_val = encoders[col].classes_[0]
+            row[col] = encoders[col].transform([raw_val])[0]
+        else:
+            row[col] = transaction.get(col, 0.0)
+
+    row_df = pd.DataFrame([row])[feat_names]
+    row_df[numeric_cols] = arts["scaler"].transform(row_df[numeric_cols])
+    return row_df
+
+
+def predict_transaction(transaction: dict[str, Any]) -> dict[str, Any]:
+    """
+    Score a single transaction dict. Keys should match the Streamlit form fields:
+    amount, hour, days_since_last, avg_amount_7d, num_transactions_24h,
+    foreign_transaction, is_weekend, card_type, merchant_category.
 
     Returns
     -------
     dict with keys:
-        fraud_probability   float   0–1
-        is_fraud            bool
-        risk_level          str     "Low" | "Medium" | "High" | "Critical"
-        confidence          str     human-readable confidence label
-        shap_values         np.ndarray  shape (n_features,)
-        feature_names       list[str]
-        top_features        list[dict]  top-3 SHAP drivers
+        fraud_probability, is_fraud, risk_level, confidence,
+        shap_values, feature_names, top_features
     """
-    arts      = load_model()
-    model     = arts["model"]
-    scaler    = arts["scaler"]
+    arts       = load_model()
+    model      = arts["model"]
     feat_names = arts["feature_names"]
 
-    # Build input row — Amount & Time need scaling; V-cols are already scaled
-    row = pd.DataFrame([{k: transaction.get(k, 0.0) for k in feat_names}])
+    row_scaled = _prepare_row(transaction, arts)
 
-    # Re-scale Amount and Time columns (same scaler fitted in train.py)
-    row_scaled = row.copy()
-    row_scaled[["Amount", "Time"]] = scaler.transform(row[["Amount", "Time"]])
-
-    # Predict
     prob     = float(model.predict_proba(row_scaled.values)[0, 1])
     is_fraud = prob >= 0.5
     risk     = _risk_level(prob)
 
-    # Per-row SHAP
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         explainer = arts["explainer"]
         shap_vals = explainer.shap_values(row_scaled.values)[0]
 
-    # Top-3 drivers by absolute SHAP impact
     top_idx = np.argsort(np.abs(shap_vals))[::-1][:3]
     top_features = [
         {
-            "feature": feat_names[i],
-            "value":   float(row.iloc[0][feat_names[i]]),
-            "impact":  float(shap_vals[i]),
+            "feature":   feat_names[i],
+            "value":     transaction.get(feat_names[i], row_scaled.iloc[0][feat_names[i]]),
+            "impact":    float(shap_vals[i]),
             "direction": "↑ fraud" if shap_vals[i] > 0 else "↓ fraud",
         }
         for i in top_idx
@@ -131,13 +136,79 @@ def predict_transaction(transaction: dict[str, float | int]) -> dict[str, Any]:
     }
 
 
+def predict_batch(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Score a DataFrame of transactions using the REAL trained model (vectorized —
+    no per-row Python loop, so this scales to large uploaded CSVs).
+
+    Required columns: amount, hour, days_since_last, avg_amount_7d,
+    num_transactions_24h, foreign_transaction, is_weekend, card_type,
+    merchant_category. Missing columns are filled with safe defaults
+    (0 for numeric/binary, the most common training category for categoricals)
+    and reported back to the caller via the returned DataFrame's attrs.
+
+    Returns the original DataFrame with two new columns:
+        fraud_probability : float, 0-1
+        prediction         : int, 1 if fraud_probability >= 0.5 else 0
+    """
+    arts             = load_model()
+    model            = arts["model"]
+    feat_names       = arts["feature_names"]
+    numeric_cols     = arts["numeric_cols"]
+    categorical_cols = arts["categorical_cols"]
+    encoders         = arts["encoders"]
+
+    work = df.copy()
+    missing_cols = [c for c in feat_names if c not in work.columns]
+
+    for col in feat_names:
+        if col not in work.columns:
+            if col in categorical_cols:
+                work[col] = encoders[col].classes_[0]
+            else:
+                work[col] = 0.0
+
+    X = pd.DataFrame(index=work.index)
+    for col in feat_names:
+        if col in categorical_cols:
+            known = set(encoders[col].classes_)
+            safe_col = work[col].where(work[col].isin(known), encoders[col].classes_[0])
+            X[col] = encoders[col].transform(safe_col)
+        else:
+            X[col] = pd.to_numeric(work[col], errors="coerce").fillna(0.0)
+
+    X = X[feat_names]
+    X[numeric_cols] = arts["scaler"].transform(X[numeric_cols])
+
+    probs = model.predict_proba(X.values)[:, 1]
+
+    result = df.copy()
+    result["fraud_probability"] = probs
+    result["prediction"] = (probs >= 0.5).astype(int)
+    result.attrs["missing_columns"] = missing_cols
+    return result
+
+
 def get_model_metrics() -> dict[str, Any]:
-    """Return the evaluation metrics stored at training time."""
+    """Real evaluation metrics computed at training time (train.py)."""
     return load_model().get("metrics", {})
 
 
+def get_confusion_matrix() -> np.ndarray:
+    m = get_model_metrics()
+    return np.array(m.get("confusion_matrix", [[0, 0], [0, 0]]))
+
+
+def get_roc_curve() -> tuple[np.ndarray, np.ndarray]:
+    m = get_model_metrics()
+    return np.array(m.get("roc_fpr", [])), np.array(m.get("roc_tpr", []))
+
+
+def get_categorical_options() -> dict[str, list[str]]:
+    return load_model().get("categorical_options", {})
+
+
 def get_shap_summary() -> dict[str, Any]:
-    """Return the pre-computed SHAP sample for global feature importance."""
     arts = load_model()
     return {
         "shap_values":   arts["shap_values"],

@@ -60,6 +60,21 @@ def load_model() -> dict[str, Any]:
     return joblib.load(MODEL_PATH)
 
 
+@lru_cache(maxsize=1)
+def get_explainer():
+    """
+    Build the SHAP TreeExplainer fresh from the loaded model, rather than
+    unpickling a saved one. TreeExplainer construction is fast (well under
+    a second for this model size), and building it fresh avoids a fragile
+    cross-environment pickle of numba-compiled internals that can break
+    when the numba/llvmlite version differs between where the model was
+    trained and where the app is deployed. Cached with lru_cache so it's
+    only built once per running process.
+    """
+    import shap
+    return shap.TreeExplainer(load_model()["model"])
+
+
 def is_model_loaded() -> bool:
     return MODEL_PATH.exists()
 
@@ -111,7 +126,7 @@ def predict_transaction(transaction: dict[str, Any]) -> dict[str, Any]:
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        explainer = arts["explainer"]
+        explainer = get_explainer()
         shap_vals = explainer.shap_values(row_scaled.values)[0]
 
     top_idx = np.argsort(np.abs(shap_vals))[::-1][:3]

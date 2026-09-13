@@ -309,7 +309,13 @@ artifacts = {
     "model":          model,
     "scaler":         scaler,
     "encoders":       encoders,
-    "explainer":      explainer,
+    # NOTE: the fitted shap.TreeExplainer object is intentionally NOT saved here.
+    # It can hold environment-specific compiled (numba) internals that don't
+    # survive being pickled in one Python/numba version and unpickled in
+    # another (exactly the kind of mismatch that breaks across a local
+    # machine vs. a deployment server). Rebuilding it from the saved model
+    # is fast (well under a second) and completely avoids that fragility —
+    # see utils/model.py's cached get_explainer().
     "feature_names":  FEATURE_ORDER,
     "numeric_cols":   NUMERIC_COLS,
     "categorical_cols": CATEGORICAL_COLS,

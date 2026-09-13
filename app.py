@@ -18,7 +18,27 @@ warnings.filterwarnings('ignore')
 # ANTHROPIC_API_KEY environment variable (Streamlit Secrets sets this as an
 # env var in deployment). We just check it's present so the UI can warn
 # early instead of failing silently deep inside a report-generation call.
-_HAS_CLAUDE_KEY = bool(os.environ.get("ANTHROPIC_API_KEY"))
+def _get_anthropic_key():
+    try:
+        key = st.secrets.get("ANTHROPIC_API_KEY")
+        if key:
+            return str(key).strip()
+    except Exception:
+        pass
+
+    try:
+        section = st.secrets.get("anthropic")
+        if section:
+            key = section.get("api_key")
+            if key:
+                return str(key).strip()
+    except Exception:
+        pass
+
+    return None
+
+
+_HAS_CLAUDE_KEY = bool(_get_anthropic_key())
 
 # ─── Page Config ───────────────────────────────────────────────────────────────
 st.set_page_config(

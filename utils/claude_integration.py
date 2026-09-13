@@ -1,9 +1,53 @@
-import anthropic
 import os
 from typing import Dict
 
-# Your API key is used automatically — recruiters don't need to enter anything
-_CLIENT = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY", "YOUR_API_KEY_HERE"))
+import anthropic
+import streamlit as st
+
+
+def _get_api_key(explicit_key: str = None) -> str | None:
+    """
+    Get the Anthropic API key from:
+    1. Explicitly provided key
+    2. Streamlit Secrets root-level key
+    3. Streamlit Secrets [anthropic] section
+    4. Environment variable
+    """
+
+    # 1. Explicit key
+    if explicit_key and explicit_key.strip():
+        return explicit_key.strip()
+
+    # 2. Root-level Streamlit secret
+    try:
+        key = st.secrets.get("ANTHROPIC_API_KEY")
+
+        if key:
+            return str(key).strip()
+
+    except Exception:
+        pass
+
+    # 3. [anthropic] section
+    try:
+        section = st.secrets.get("anthropic")
+
+        if section:
+            key = section.get("api_key")
+
+            if key:
+                return str(key).strip()
+
+    except Exception:
+        pass
+
+    # 4. Environment variable
+    key = os.getenv("ANTHROPIC_API_KEY")
+
+    if key:
+        return key.strip()
+
+    return None
 
 
 def generate_fraud_report(
@@ -11,109 +55,189 @@ def generate_fraud_report(
     fraud_prob: float,
     is_fraud: bool,
     shap_values: Dict,
-    api_key: str = None,  # kept for backward compatibility, no longer used
+    api_key: str = None,
 ) -> str:
     """
-    Use Claude API to generate a detailed fraud investigation report.
+    Generate an AI-powered fraud analysis using Claude.
     """
 
-    shap_summary = "\n".join([
-        f"  - {feature}: {value:+.3f} impact"
-        for feature, value in shap_values.items()
-    ])
+    api_key = _get_api_key(api_key)
 
-    feature_summary = f"""
-    - Amount: ₹{features['amount']:,.2f}
-    - Time: {features['hour']:02d}:00 hours
-    - Days since last transaction: {features['days_since_last']}
-    - Average transaction (7 days): ₹{features['avg_amount_7d']:,.2f}
-    - Transactions in last 24h: {features['num_transactions_24h']}
-    - Foreign transaction: {'Yes' if features['foreign_transaction'] else 'No'}
-    - Card type: {features['card_type']}
-    - Merchant category: {features['merchant_category']}
-    - Weekend transaction: {'Yes' if features['is_weekend'] else 'No'}
-    """
+    if not api_key:
+        return (
+            "⚠️ Anthropic API key is not configured. "
+            "Add ANTHROPIC_API_KEY in "
+            "Streamlit Cloud → App settings → Secrets."
+        )
 
-    decision = "FLAGGED AS FRAUDULENT" if is_fraud else "CLEARED AS LEGITIMATE"
+    client = anthropic.Anthropic(
+        api_key=api_key
+    )
 
-    prompt = f"""You are a senior fraud analyst at a major Indian bank.
-An AI model has analyzed a credit card transaction and produced the following results.
+    risk_level = (
+        "Critical"
+        if fraud_prob >= 0.75
+        else "High"
+        if fraud_prob >= 0.50
+        else "Medium"
+        if fraud_prob >= 0.25
+        else "Low"
+    )
 
-TRANSACTION DETAILS:
-{feature_summary}
+    feature_explanations = []
 
-MODEL OUTPUT:
-- Fraud Probability: {fraud_prob*100:.1f}%
-- Decision: {decision}
+    for feature, value in shap_values.items():
 
-KEY RISK FACTORS (SHAP Analysis):
-{shap_summary}
+        direction = (
+            "increases"
+            if value > 0
+            else "decreases"
+        )
 
-Write a professional fraud investigation report with the following sections:
-1. Executive Summary - One sentence verdict
-2. Risk Assessment - What specific patterns triggered the alert
-3. Behavioral Analysis - How this transaction compares to normal behavior
-4. Recommended Action - What the bank should do (approve/block/call customer)
-5. Prevention Note - One tip to prevent similar fraud
+        feature_explanations.append(
+            f"- {feature}: contribution={value:.4f} "
+            f"({direction} fraud risk)"
+        )
 
-Keep it concise, professional, and actionable. Use bullet points where appropriate.
-Format in clean markdown. Do not use ** for bold — use plain text only.
-Do not leave any incomplete bullet points or sentences."""
+    shap_text = "\n".join(
+        feature_explanations
+    )
+
+    prompt = f"""
+You are a financial fraud detection analyst.
+
+Analyze the following transaction:
+
+Transaction features:
+{features}
+
+Fraud probability: {fraud_prob:.2%}
+Prediction: {"FRAUDULENT" if is_fraud else "LEGITIMATE"}
+Risk level: {risk_level}
+
+Feature contributions:
+{shap_text}
+
+Provide a concise professional fraud analysis containing:
+
+1. Overall assessment
+2. Main factors influencing the prediction
+3. Why the transaction appears risky or safe
+4. Recommended action
+
+Do not invent information that is not present in the transaction data.
+"""
 
     try:
-        message = _CLIENT.messages.create(
+
+        message = client.messages.create(
             model="claude-sonnet-4-5",
             max_tokens=1000,
             messages=[
-                {"role": "user", "content": prompt}
-            ]
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
         )
+
         return message.content[0].text
 
     except anthropic.AuthenticationError:
-        return "❌ Invalid API key. Please check your Anthropic API key."
+
+        return (
+            "❌ Invalid API key. "
+            "Please check your Anthropic API key."
+        )
+
     except anthropic.RateLimitError:
-        return "⚠️ Rate limit reached. Please wait a moment and try again."
+
+        return (
+            "⚠️ Rate limit reached. "
+            "Please wait a moment and try again."
+        )
+
     except Exception as e:
-        return f"⚠️ Could not generate report: {str(e)}"
+
+        return (
+            f"⚠️ Could not generate report: {str(e)}"
+        )
 
 
 def generate_batch_summary(
-    total: int,
-    flagged: int,
+    total_transactions: int,
+    fraudulent_transactions: int,
     fraud_rate: float,
-    top_merchants: Dict,
-    top_hours: Dict,
-    api_key: str = None,  # kept for backward compatibility, no longer used
+    api_key: str = None,
 ) -> str:
     """
-    Generate an executive summary for batch fraud analysis.
+    Generate an AI-powered summary for batch analysis.
     """
 
-    prompt = f"""You are a fraud analytics manager reviewing a batch transaction report.
+    api_key = _get_api_key(api_key)
 
-BATCH ANALYSIS RESULTS:
-- Total Transactions Analyzed: {total:,}
-- Flagged as Fraudulent: {flagged:,}
-- Overall Fraud Rate: {fraud_rate:.2f}%
-- Highest Risk Merchants: {top_merchants}
-- Peak Fraud Hours: {top_hours}
+    if not api_key:
+        return (
+            "⚠️ Anthropic API key is not configured. "
+            "Add ANTHROPIC_API_KEY in "
+            "Streamlit Cloud → App settings → Secrets."
+        )
 
-Write a 3-paragraph executive summary covering:
-1. Overall fraud landscape and severity assessment
-2. Key patterns and hotspots identified
-3. Strategic recommendations for fraud prevention
+    client = anthropic.Anthropic(
+        api_key=api_key
+    )
 
-Be data-driven, concise, and actionable."""
+    prompt = f"""
+You are a financial fraud analytics expert.
+
+Summarize the following batch fraud detection results:
+
+Total transactions: {total_transactions}
+Fraudulent transactions: {fraudulent_transactions}
+Fraud rate: {fraud_rate:.2%}
+
+Provide:
+
+1. Overall risk assessment
+2. Key observations
+3. Business implications
+4. Recommended actions
+
+Keep the response concise and professional.
+Do not invent information.
+"""
 
     try:
-        message = _CLIENT.messages.create(
+
+        message = client.messages.create(
             model="claude-sonnet-4-5",
             max_tokens=1000,
             messages=[
-                {"role": "user", "content": prompt}
-            ]
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
         )
+
         return message.content[0].text
+
+    except anthropic.AuthenticationError:
+
+        return (
+            "❌ Invalid API key. "
+            "Please check your Anthropic API key."
+        )
+
+    except anthropic.RateLimitError:
+
+        return (
+            "⚠️ Rate limit reached. "
+            "Please wait a moment and try again."
+        )
+
     except Exception as e:
-        return f"⚠️ Could not generate summary: {str(e)}"
+
+        return (
+            f"⚠️ Could not generate report: {str(e)}"
+        )

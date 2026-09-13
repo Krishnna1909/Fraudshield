@@ -35,6 +35,7 @@ import pandas as pd
 import numpy as np
 import joblib
 import os
+import xgboost as xgb
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.model_selection import train_test_split
@@ -67,7 +68,7 @@ with warnings.catch_warnings():
         if not hasattr(np, _alias):
             setattr(np, _alias, _target)
 
-import shap  # noqa: E402 — must come after the patch above
+
 # ─────────────────────────────────────────────────────────────────────────────
 
 RANDOM_STATE = 42
@@ -290,8 +291,22 @@ print("\n🔍 Computing SHAP values (sample of 500 rows) ...")
 sample_idx = X_test.sample(min(500, len(X_test)), random_state=RANDOM_STATE).index
 X_sample   = X_test.loc[sample_idx]
 
-explainer   = shap.TreeExplainer(model)
-shap_values = explainer.shap_values(X_sample)
+booster = model.get_booster()
+
+dmatrix = xgb.DMatrix(
+    X_sample,
+    feature_names=list(X_sample.columns),
+)
+
+contribs = booster.predict(
+    dmatrix,
+    pred_contribs=True,
+)
+
+shap_values = np.asarray(
+    contribs[:, :-1],
+    dtype=float,
+)
 
 # ── 10. Batch-demo sample CSV (real rows, unscaled, human-readable) ─────────
 # Lets Tab 3 ship a "Download sample CSV" the user can immediately re-upload,

@@ -39,7 +39,7 @@ def _get_anthropic_key():
 
 
 _HAS_CLAUDE_KEY = bool(_get_anthropic_key())
-st.write("DEBUG: Anthropic secret detected =", _HAS_CLAUDE_KEY)
+
 
 # ─── Page Config ───────────────────────────────────────────────────────────────
 st.set_page_config(
